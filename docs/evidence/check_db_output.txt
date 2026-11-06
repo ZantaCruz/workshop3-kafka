@@ -1,0 +1,13 @@
+# python tests/check_db.py  (tras la prueba stop-produce-restart)
+Eventos por estado: [('INVALID_SCHEMA', 4), ('INVALID_VALUES', 22), ('VALID', 782)]
+Motivos de rechazo:
+   ('INVALID_VALUES', 'duplicate event_id', 20)
+   ('INVALID_SCHEMA', 'empty field: country', 1)
+   ('INVALID_SCHEMA', 'family must be numeric (got str)', 1)
+   ('INVALID_SCHEMA', 'invalid JSON: Expecting value: line 1 column 1 (char 0)', 1)
+   ('INVALID_SCHEMA', 'missing field: gdp', 1)
+   ('INVALID_VALUES', 'event_time is not a valid ISO-8601 timestamp', 1)
+   ('INVALID_VALUES', 'gdp=-4.2 out of range [0.0, 3.0]', 1)
+fact_predictions: 782 filas | event_id distintos: 782 | MAE: 0.429
+Sin duplicados en el hecho: True
+Mensajes por partición: [(0, 326), (1, 234), (2, 248)]

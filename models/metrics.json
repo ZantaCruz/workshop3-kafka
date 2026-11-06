@@ -1,0 +1,53 @@
+{
+  "chosen_model": "LinearRegression",
+  "features": [
+    "gdp",
+    "family",
+    "health",
+    "freedom",
+    "generosity",
+    "corruption"
+  ],
+  "target": "happiness_score",
+  "split": "GroupShuffleSplit by country, 70/30, seed=42",
+  "n_train": 542,
+  "n_test": 240,
+  "metrics": {
+    "LinearRegression": {
+      "train": {
+        "MAE": 0.4275,
+        "RMSE": 0.5427,
+        "R2": 0.7515
+      },
+      "test": {
+        "MAE": 0.4318,
+        "RMSE": 0.5619,
+        "R2": 0.7838
+      }
+    },
+    "DecisionTree": {
+      "train": {
+        "MAE": 0.3285,
+        "RMSE": 0.4269,
+        "R2": 0.8462
+      },
+      "test": {
+        "MAE": 0.5433,
+        "RMSE": 0.6828,
+        "R2": 0.6808
+      }
+    },
+    "RandomForest": {
+      "train": {
+        "MAE": 0.1341,
+        "RMSE": 0.1757,
+        "R2": 0.974
+      },
+      "test": {
+        "MAE": 0.4797,
+        "RMSE": 0.6124,
+        "R2": 0.7432
+      }
+    }
+  }
+}

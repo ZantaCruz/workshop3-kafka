@@ -1,0 +1,6 @@
+services:
+  kafka:
+    image: apache/kafka:4.4.0
+    container_name: happiness-kafka-broker
+    ports:
+      - "9092:9092"

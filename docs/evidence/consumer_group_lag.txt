@@ -1,0 +1,21 @@
+# Prueba stop-produce-restart. Grupo: happiness-ml-team. Comando:
+# docker compose exec kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 --describe --group happiness-ml-team
+
+## 1) ANTES: consumidor detenido (Ctrl+C), grupo al día
+Consumer group 'happiness-ml-team' has no active members.
+GROUP             TOPIC            PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG
+happiness-ml-team happiness-events 0          451             451             0
+happiness-ml-team happiness-events 1          341             341             0
+happiness-ml-team happiness-events 2          356             356             0
+
+## 2) DURANTE: productor envió 20 eventos con el consumidor apagado
+Consumer group 'happiness-ml-team' has no active members.
+happiness-ml-team happiness-events 0          451             463             12
+happiness-ml-team happiness-events 1          341             344             3
+happiness-ml-team happiness-events 2          356             361             5
+# LAG total = 12 + 3 + 5 = 20  (los eventos esperan en Kafka)
+
+## 3) DESPUES: consumidor reiniciado, backlog procesado
+happiness-ml-team happiness-events 0          463             463             0   rdkafka-a9d7974e-...  /172.29.0.1
+happiness-ml-team happiness-events 1          344             344             0   rdkafka-a9d7974e-...  /172.29.0.1
+happiness-ml-team happiness-events 2          361             361             0   rdkafka-a9d7974e-...  /172.29.0.1
