@@ -1,66 +1,65 @@
-# Informe técnico — Workshop 3: Streaming ETL con Apache Kafka y Machine Learning
+# Technical Report — Workshop 3: Streaming ETL with Apache Kafka and Machine Learning
 
-**Curso:** ETL (G01) · Ingeniería de Datos e IA · Universidad Autónoma de Occidente
+**Course:** ETL (G01) · Data Engineering and Artificial Intelligence · Universidad Autónoma de Occidente
 **Dataset:** World Happiness Report 2015–2019 · **Stack:** Python 3.12, Apache Kafka 4.4 (Docker), scikit-learn, SQLite, Streamlit
 
 ---
 
-## Tabla de contenido
-1. Resumen ejecutivo
-2. Arquitectura
-3. Parte A — Integración, limpieza y modelo
-4. Parte B — Pipeline Kafka y contrato del evento
-5. Parte C — Base de datos y dashboard
-6. Reproducción paso a paso
-7. Verificación y pruebas realizadas
-8. Cumplimiento del enunciado (checklist)
-9. Limitaciones y trabajo futuro
-10. Estructura del repositorio
+## Table of contents
+1. Executive summary
+2. Architecture
+3. Part A — Integration, cleaning and model
+4. Part B — Kafka pipeline and event contract
+5. Part C — Database and dashboard
+6. Step-by-step reproduction
+7. Verification, tests and evidence
+8. Limitations and future work
+9. Repository structure
 
 ---
 
-## 1. Resumen ejecutivo
-Se construyó un pipeline de punta a punta que (a) integra cinco CSV con esquemas distintos en un dataset único de **782 observaciones país-año (164 países)**, (b) entrena y serializa un pipeline de regresión (`model.pkl`), (c) emite cada observación como evento a Kafka, (d) consume los eventos validando un contrato, generando una predicción en tiempo real y guardando tanto el evento crudo como el resultado en una base de datos, y (e) muestra 4 KPIs en un dashboard que consulta la base de datos (no los CSV).
+## 1. Executive summary
+An end-to-end pipeline was built that (a) integrates five CSV files with different schemas into a single dataset of **782 country-year observations (164 countries)**, (b) trains and serializes a regression pipeline (`model.pkl`), (c) publishes each observation as an event to Kafka, (d) consumes the events by validating a contract, generating a real-time prediction and storing both the raw event and the result in a database, and (e) shows 4 KPIs in a dashboard that queries the database (not the CSV files).
 
-Resultado del modelo (test, países no vistos): **MAE 0.432 · RMSE 0.562 · R² 0.784** con regresión lineal. Como pide el enunciado, el foco está en la arquitectura, la confiabilidad y la reproducibilidad, no en maximizar la precisión.
+Model result (test set, unseen countries): **MAE 0.432 · RMSE 0.562 · R² 0.784** with linear regression. As the assignment requires, the focus is on architecture, reliability and reproducibility, not on maximizing accuracy.
 
-## 2. Arquitectura
+## 2. Architecture
 ```
 OFFLINE
- CSV 2015–2019 ─▶ EDA + limpieza + armonización ─▶ features ─▶ regresión ─▶ models/model.pkl
-                    (notebooks/eda.ipynb)         (notebooks/model_training.ipynb)
+ CSV 2015–2019 ─▶ EDA + cleaning + harmonization ─▶ features ─▶ regression ─▶ models/model.pkl
+                    (notebooks/eda.ipynb)          (notebooks/model_training.ipynb)
 
 STREAMING
  data/streaming/happiness_stream.csv
-        │ fila por fila, delay configurable
+        │ row by row, configurable delay
         ▼
- Producer (key = country) ─▶ Topic happiness-events (3 particiones, RF=1) ─▶ Consumer (grupo happiness-ml-team)
+ Producer (key = country) ─▶ Topic happiness-events (3 partitions, RF=1) ─▶ Consumer (group happiness-ml-team)
                                                                                 │
-   1. INSERT en raw_happiness_events (mensaje original, status RECEIVED)        │
-   2. Validar contrato        ─ falla ─▶ INVALID_SCHEMA / INVALID_VALUES (se guarda, se omite, no se cae)
-   3. Features en el orden del entrenamiento (feature_names_in_ del Pipeline)
-   4. model.predict           ─ falla ─▶ PREDICTION_ERROR
-   5. dim_country + dim_date + fact_predictions, status VALID (transacción atómica)
-   6. commit manual del offset (después de persistir)
+   1. INSERT into raw_happiness_events (original message, status RECEIVED)      │
+   2. Validate contract       ─ fails ─▶ INVALID_SCHEMA / INVALID_VALUES (stored, skipped, no crash)
+   3. Features in training order (feature_names_in_ of the Pipeline)
+   4. model.predict           ─ fails ─▶ PREDICTION_ERROR
+   5. dim_country + dim_date + fact_predictions, status VALID (atomic transaction)
+   6. manual offset commit (after persisting)
                                                                                 ▼
-                                                  SQLite (storage/happiness.db) ─▶ Dashboard Streamlit
+                                                  SQLite (storage/happiness.db) ─▶ Streamlit dashboard
 ```
-**Decisiones de diseño**
-| Decisión | Motivo |
+**Design decisions**
+| Decision | Reason |
 |---|---|
-| Lógica de negocio en `kafka/processing.py`, separada de Kafka | Se puede probar sin broker (`tests/test_pipeline.py`) y el consumidor queda delgado. |
-| Commit manual del offset tras escribir en BD | Semántica *at-least-once*: si el proceso cae antes de guardar, el mensaje se reprocesa en vez de perderse. |
-| `UNIQUE(topic, partition, offset)` en la tabla raw | Un replay no duplica filas (idempotencia a nivel de mensaje). |
-| El evento crudo se inserta **antes** de validar | Trazabilidad/auditoría: todo lo que llega queda registrado, incluso JSON roto. |
-| Un evento defectuoso nunca lanza excepción | El enunciado exige que los inválidos se guarden, se omitan de la predicción y no tumben el pipeline. |
-| SQLite | Permitido por el enunciado, sin servidor; el esquema es portable a PostgreSQL. |
+| Business logic in `kafka/processing.py`, separate from Kafka | It can be tested without a broker (`tests/test_pipeline.py`) and the consumer stays thin. |
+| Manual offset commit after writing to the DB | *At-least-once* semantics: if the process dies before saving, the message is reprocessed instead of lost. |
+| `UNIQUE(topic, partition, offset)` in the raw table | A replay does not duplicate rows (message-level idempotence). |
+| The raw event is inserted **before** validation | Traceability/audit: everything that arrives is recorded, even broken JSON. |
+| A defective event never raises an exception | The assignment requires invalid records to be stored, skipped from prediction and not to crash the pipeline. |
+| SQLite | Allowed by the assignment, no server needed; the schema is portable to PostgreSQL. |
 
 ---
 
-## 3. Parte A — Integración, limpieza y modelo
+## 3. Part A — Integration, cleaning and model
 
-### 3.1 Perfilado (EDA, `notebooks/eda.ipynb`)
-| Año | Filas | Nulos | Filas duplicadas | Países duplicados |
+### 3.1 Profiling (EDA, `notebooks/eda.ipynb`)
+| Year | Rows | Nulls | Duplicate rows | Duplicate countries |
 |---|---|---|---|---|
 | 2015 | 158 | 0 | 0 | 0 |
 | 2016 | 157 | 0 | 0 | 0 |
@@ -68,229 +67,215 @@ STREAMING
 | 2018 | 156 | 1 (`Perceptions of corruption`) | 0 | 0 |
 | 2019 | 156 | 0 | 0 | 0 |
 
-**Inconsistencias de esquema encontradas**
-- *Nombre del país:* `Country` (2015–2017) vs `Country or region` (2018–2019).
-- *Nombres de variables:* p. ej. `Economy (GDP per Capita)` / `Economy..GDP.per.Capita.` / `GDP per capita`; `Family` / `Social support`; `Health (Life Expectancy)` / `Healthy life expectancy`; `Freedom` / `Freedom to make life choices`; `Trust (Government Corruption)` / `Perceptions of corruption`.
-- *Columnas que existen solo en algunos años:* `Region` (2015–16), `Standard Error` (2015), intervalos de confianza (2016), `Whisker.*` (2017), `Dystopia Residual` (2015–17); el ranking tiene tres nombres.
-- *Tipos / formato:* 2017 viene exportado desde R (encabezados con comillas y puntos, ~15 decimales).
-- *Nombres de país distintos para la misma entidad:* Macedonia / North Macedonia, North Cyprus / Northern Cyprus, Somaliland region / Region, Hong Kong S.A.R., China / Hong Kong, Taiwan Province of China / Taiwan, Trinidad and Tobago / Trinidad & Tobago.
+**Schema inconsistencies found**
+- *Country column:* `Country` (2015–2017) vs `Country or region` (2018–2019).
+- *Variable names:* e.g. `Economy (GDP per Capita)` / `Economy..GDP.per.Capita.` / `GDP per capita`; `Family` / `Social support`; `Health (Life Expectancy)` / `Healthy life expectancy`; `Freedom` / `Freedom to make life choices`; `Trust (Government Corruption)` / `Perceptions of corruption`.
+- *Columns present only in some years:* `Region` (2015–16), `Standard Error` (2015), confidence intervals (2016), `Whisker.*` (2017), `Dystopia Residual` (2015–17); the rank column has three different names.
+- *Types / format:* the 2017 file was exported from R (quoted headers with dots, ~15 decimals).
+- *Different country names for the same entity:* Macedonia / North Macedonia, North Cyprus / Northern Cyprus, Somaliland region / Region, Hong Kong S.A.R., China / Hong Kong, Taiwan Province of China / Taiwan, Trinidad and Tobago / Trinidad & Tobago.
 
-**Outliers (IQR 1.5×):** `family` 10, `generosity` 17, `corruption` 68; ninguno en `gdp`, `health`, `freedom` ni en el score. Hay 5 ceros en gdp/family/health/freedom/generosity y 6 en corruption.
+**Outliers (IQR 1.5×):** `family` 10, `generosity` 17, `corruption` 68; none in `gdp`, `health`, `freedom` or the score. There are 5 zeros in gdp/family/health/freedom/generosity and 6 in corruption.
 
-### 3.2 Decisiones de limpieza y justificación
-| Problema | Decisión | Justificación |
+### 3.2 Cleaning decisions and justification
+| Problem | Decision | Justification |
 |---|---|---|
-| Nombres de columnas distintos | Mapeo explícito a `country, year, gdp, family, health, freedom, generosity, corruption, happiness_score` | Un único esquema analítico y el mismo que usa el contrato del evento. |
-| Tipos inconsistentes | Numéricos a `float64`, `year` a `int64` (con `errors="raise"` para detectar texto oculto) | Garantiza que el entrenamiento y el streaming vean los mismos tipos. |
-| Nombres de país distintos | Diccionario de normalización (6 casos) | Sin esto un mismo país contaría como dos y se rompería la agrupación y el split. |
-| 1 nulo en `corruption` (Emiratos Árabes Unidos, 2018) | Imputar con la **media del mismo país** en los otros años (salvaguarda: mediana global) | La percepción de corrupción es específica de cada país y estable en el tiempo; eliminar la fila perdería una observación completa por un solo campo. |
-| Países con <5 años de datos | Se conservan | Son entradas/salidas reales de la encuesta (Angola, Belize, Sudan, Puerto Rico…), no errores de nombre. |
-| Outliers y ceros | Se **conservan** | Son valores reales de la fuente (países con indicadores muy bajos); eliminarlos sesgaría el modelo y el streaming debe poder verlos. Se controlan con rangos en el contrato. |
-| `Region`, SE, CI, Whisker, Dystopia, Rank | Se descartan del esquema unificado | No existen en todos los años y varias derivan del target (ver 3.3). |
-| Duplicados | No existían; se verifica país-año único | Control de calidad del merge. |
+| Different column names | Explicit mapping to `country, year, gdp, family, health, freedom, generosity, corruption, happiness_score` | A single analytical schema, the same one used by the event contract. |
+| Inconsistent types | Numerics to `float64`, `year` to `int64` (with `errors="raise"` to catch hidden text) | Guarantees training and streaming see the same types. |
+| Different country names | Normalization dictionary (6 cases) | Otherwise one country would count as two, breaking grouping and the split. |
+| 1 null in `corruption` (United Arab Emirates, 2018) | Impute with the **same country's mean** from other years (fallback: global median) | Corruption perception is country-specific and stable over time; dropping the row would lose a whole observation for one missing field. |
+| Countries with <5 years of data | Kept | They are real entries/exits of the survey (Angola, Belize, Sudan, Puerto Rico…), not naming errors. |
+| Outliers and zeros | **Kept** | They are real source values (countries with very low indicators); removing them would bias the model and the stream must be able to see them. They are controlled with ranges in the contract. |
+| `Region`, SE, CI, Whisker, Dystopia, Rank | Dropped from the unified schema | They do not exist in every year and several are derived from the target (see 3.3). |
+| Duplicates | None found; country-year uniqueness is verified | Merge quality control. |
 
-Esquema unificado final (`data/processed/happiness_unified.csv`, 782 filas): `country` (string), `year` (int), `gdp`, `family`, `health`, `freedom`, `generosity`, `corruption` (float), `happiness_score` (float, target).
+Final unified schema (`data/processed/happiness_unified.csv`, 782 rows): `country` (string), `year` (int), `gdp`, `family`, `health`, `freedom`, `generosity`, `corruption` (float), `happiness_score` (float, target).
 
 ### 3.3 Feature engineering
-- **Features (6):** `gdp, family, health, freedom, generosity, corruption`. Correlación con el score: gdp 0.79, health 0.74, family 0.65, freedom 0.55, corruption 0.40, generosity 0.14.
-- **Excluidas y por qué**
-  - `happiness_score`: es el target (en el evento llega como `actual_happiness_score`, solo para evaluar).
-  - `Dystopia Residual`, `Rank`, `Standard Error`, CI, `Whisker`: derivan del score → **fuga de target**; además no existen en todos los años ni en el evento.
-  - `region`: solo existe en 2015–2016.
-  - `country`: alta cardinalidad; se usa como *key* de Kafka, no como feature.
-  - `year`: identifica la observación, no explica la felicidad.
-- **Categóricas:** no hay variables categóricas en las features, por lo tanto no se requiere encoding.
-- **Escalado:** `StandardScaler` **dentro** del `Pipeline`, de modo que el consumidor aplica exactamente el preprocesamiento aprendido en entrenamiento.
-- **Split 70/30 agrupado por país (`GroupShuffleSplit`, seed 42):** 542 filas de entrenamiento y 240 de prueba, 0 países en común. Un país aparece hasta 5 veces con scores casi iguales; un split por filas filtraría información de train a test e inflaría las métricas.
+- **Features (6):** `gdp, family, health, freedom, generosity, corruption`. Correlation with the score: gdp 0.79, health 0.74, family 0.65, freedom 0.55, corruption 0.40, generosity 0.14.
+- **Excluded and why**
+  - `happiness_score`: it is the target (it arrives in the event as `actual_happiness_score`, for evaluation only).
+  - `Dystopia Residual`, `Rank`, `Standard Error`, CI, `Whisker`: derived from the score → **target leakage**; they also do not exist in every year or in the event.
+  - `region`: only exists in 2015–2016.
+  - `country`: high cardinality; used as the Kafka *key*, not as a feature.
+  - `year`: identifies the observation, it does not explain happiness.
+- **Categorical data:** the features contain no categorical variables, so no encoding is required.
+- **Scaling:** `StandardScaler` **inside** the `Pipeline`, so the consumer applies exactly the preprocessing learned during training.
+- **70/30 split grouped by country (`GroupShuffleSplit`, seed 42):** 542 training rows and 240 test rows, 0 countries in common. A country appears up to 5 times with nearly identical scores; a row-level split would leak information from train to test and inflate the metrics.
 
-### 3.4 Modelo y evaluación
-| Modelo | Test MAE | Test RMSE | Test R² | Train R² |
+### 3.4 Model and evaluation
+| Model | Test MAE | Test RMSE | Test R² | Train R² |
 |---|---|---|---|---|
-| **Linear Regression (elegido)** | **0.432** | **0.562** | **0.784** | 0.752 |
+| **Linear Regression (chosen)** | **0.432** | **0.562** | **0.784** | 0.752 |
 | Decision Tree (depth 5) | 0.543 | 0.683 | 0.681 | 0.846 |
 | Random Forest (200) | 0.480 | 0.612 | 0.743 | 0.974 |
 
-La regresión lineal es la más simple **y** la mejor en test; Random Forest sobreajusta (R² 0.974 en train vs 0.743 en test). Coeficientes estandarizados: gdp 0.453, freedom 0.241, family 0.239, health 0.205, corruption 0.074, generosity 0.063 (intercepto 5.386). Artefactos: `models/model.pkl` (Pipeline completo) y `models/metrics.json`. El notebook recarga el pickle y verifica que reproduce las predicciones.
+Linear regression is the simplest **and** the best on test; Random Forest overfits (R² 0.974 on train vs 0.743 on test). Standardized coefficients: gdp 0.453, freedom 0.241, family 0.239, health 0.205, corruption 0.074, generosity 0.063 (intercept 5.386). Artifacts: `models/model.pkl` (full Pipeline) and `models/metrics.json`. The notebook reloads the pickle and checks that it reproduces the predictions.
 
 ---
 
-## 4. Parte B — Pipeline Kafka y contrato del evento
+## 4. Part B — Kafka pipeline and event contract
 
-### 4.1 Productor (`kafka/producer.py`)
-- Lee `data/streaming/happiness_stream.csv` (dataset preparado, orden mezclado) **fila por fila**.
-- Serializa JSON con el formato exacto del enunciado, `key = country`, topic `happiness-events`.
-- Crea el topic (3 particiones, replicación 1) si no existe, usando `AdminClient`.
-- `event_time` = instante en que el productor emite el evento; `event_id` = `E0001`, `E0002`… (4 dígitos porque hay 782 eventos).
-- Parámetros: `--delay` (segundos entre eventos), `--subset all|test|train`, `--limit N`, `--bootstrap`, `--inject-invalid` (intercala 6 eventos defectuosos de demostración), productor idempotente (`enable.idempotence`).
+### 4.1 Producer (`kafka/producer.py`)
+- Reads `data/streaming/happiness_stream.csv` (prepared dataset, shuffled order) **row by row**.
+- Serializes JSON in the exact format required by the assignment, `key = country`, topic `happiness-events`.
+- Creates the topic (3 partitions, replication factor 1) if it does not exist, using `AdminClient`.
+- `event_time` = the instant the producer emits the event; `event_id` = `E0001`, `E0002`… (4 digits because there are 782 events).
+- Parameters: `--delay` (seconds between events), `--subset all|test|train`, `--limit N`, `--bootstrap`, `--inject-invalid` (interleaves 6 defective demo events), idempotent producer (`enable.idempotence`).
 
-### 4.2 Contrato del evento
+### 4.2 Event contract
 ```json
 {"event_id":"E0001","country":"Colombia","year":2019,"gdp":1.2,"family":0.8,"health":0.9,
  "freedom":0.6,"generosity":0.3,"corruption":0.1,"actual_happiness_score":6.2,"event_time":"2026-10-30T15:30:00"}
 ```
-| Campo | Regla | Estado si falla |
+| Field | Rule | Status on failure |
 |---|---|---|
-| `event_id` | string no vacío, único entre eventos VALID | vacío/tipo → `INVALID_SCHEMA`; repetido → `INVALID_VALUES` |
-| `country` | string no vacío (también es la key Kafka) | `INVALID_SCHEMA` |
-| `year` | entero (no bool/float), 2000–2100 | tipo → `INVALID_SCHEMA`; rango → `INVALID_VALUES` |
-| `gdp, family, health, freedom, generosity, corruption` | numérico (no bool/str), finito, dentro de rango plausible | tipo/None/ausente → `INVALID_SCHEMA`; NaN o fuera de rango → `INVALID_VALUES` |
-| `actual_happiness_score` | numérico 0–10; **solo evaluación, nunca feature** | ídem |
-| `event_time` | ISO-8601 válido | string vacío → `INVALID_SCHEMA`; no parseable → `INVALID_VALUES` |
-| Features del modelo | todas presentes (se leen de `model.feature_names_in_`) | `INVALID_SCHEMA` |
-| Predicción | finita y sin excepción | `PREDICTION_ERROR` |
+| `event_id` | non-empty string, unique among VALID events | empty/type → `INVALID_SCHEMA`; repeated → `INVALID_VALUES` |
+| `country` | non-empty string (also the Kafka key) | `INVALID_SCHEMA` |
+| `year` | integer (not bool/float), 2000–2100 | type → `INVALID_SCHEMA`; range → `INVALID_VALUES` |
+| `gdp, family, health, freedom, generosity, corruption` | numeric (not bool/str), finite, within a plausible range | type/None/missing → `INVALID_SCHEMA`; NaN or out of range → `INVALID_VALUES` |
+| `actual_happiness_score` | numeric 0–10; **evaluation only, never a feature** | same as above |
+| `event_time` | valid ISO-8601 | empty string → `INVALID_SCHEMA`; not parseable → `INVALID_VALUES` |
+| Model features | all present (read from `model.feature_names_in_`) | `INVALID_SCHEMA` |
+| Prediction | finite and without exception | `PREDICTION_ERROR` |
 
-Rangos: gdp [0, 3], family [0, 2.5], health [0, 1.5], freedom/generosity/corruption [0, 1], score [0, 10] (holgados respecto a lo observado en 2015–2019). Campos extra se ignoran; JSON roto, payloads que no son objeto y mensajes vacíos se guardan en raw y se marcan sin romper el consumidor.
+Ranges: gdp [0, 3], family [0, 2.5], health [0, 1.5], freedom/generosity/corruption [0, 1], score [0, 10] (generous relative to what was observed in 2015–2019). Extra fields are ignored; broken JSON, payloads that are not objects and empty messages are stored in raw and marked without breaking the consumer.
 
-### 4.3 Consumidor (`kafka/consumer.py` + `kafka/processing.py`)
-Grupo `happiness-ml-team`, `auto.offset.reset=earliest`, `enable.auto.commit=false`. Por cada mensaje: guarda crudo → valida → arma el DataFrame con las columnas en el orden de entrenamiento → `model.predict` → carga atómica en dimensiones y hecho → marca `VALID` → confirma offset. Opción `--idle-exit N` para terminar solo tras N segundos sin mensajes (útil en demos).
+### 4.3 Consumer (`kafka/consumer.py` + `kafka/processing.py`)
+Group `happiness-ml-team`, `auto.offset.reset=earliest`, `enable.auto.commit=false`. For each message: store raw → validate → build the DataFrame with columns in training order → `model.predict` → atomic load into dimensions and fact → mark `VALID` → commit offset. The `--idle-exit N` option stops the consumer after N seconds without messages (useful for demos).
 
 ---
 
-## 5. Parte C — Base de datos y dashboard
+## 5. Part C — Database and dashboard
 
-### 5.1 Modelo de datos (`sql/create_tables.sql`)
+### 5.1 Data model (`sql/create_tables.sql`)
 ```
 raw_happiness_events ◀── fact_predictions ──▶ dim_country
- (staging/trazabilidad)            │
+ (staging/traceability)            │
                                    └────────▶ dim_date
 ```
-- **`raw_happiness_events`** (no es dimensión): `raw_event_id` PK, `kafka_topic/partition/offset/key`, `raw_payload` (original sin modificar), `event_id`, `received_at`, `processing_status` ∈ {RECEIVED, VALID, INVALID_SCHEMA, INVALID_VALUES, PREDICTION_ERROR}, `status_detail` (motivo). `UNIQUE(topic, partition, offset)`.
-- **`dim_country`**: `country_id`, `country_name` (único).
-- **`dim_date`**: `date_id` (AAAA0101), `full_date`, `year`, `decade`. Representa el **año de observación**; la fecha del streaming vive en `event_time` / `prediction_timestamp` del hecho.
-- **`fact_predictions`**: `prediction_id`, `raw_event_id` (FK única → trazabilidad), `country_id`, `date_id`, `actual_score`, `predicted_score`, `prediction_error` (= predicho − real, con signo), `abs_prediction_error`, `event_time`, `prediction_timestamp`, `model_name`.
+- **`raw_happiness_events`** (not a dimension): `raw_event_id` PK, `kafka_topic/partition/offset/key`, `raw_payload` (original, unmodified), `event_id`, `received_at`, `processing_status` ∈ {RECEIVED, VALID, INVALID_SCHEMA, INVALID_VALUES, PREDICTION_ERROR}, `status_detail` (reason). `UNIQUE(topic, partition, offset)`.
+- **`dim_country`**: `country_id`, `country_name` (unique).
+- **`dim_date`**: `date_id` (YYYY0101), `full_date`, `year`, `decade`. Represents the **observation year**; the streaming time lives in the fact's `event_time` / `prediction_timestamp`.
+- **`fact_predictions`**: `prediction_id`, `raw_event_id` (unique FK → traceability), `country_id`, `date_id`, `actual_score`, `predicted_score`, `prediction_error` (= predicted − actual, signed), `abs_prediction_error`, `event_time`, `prediction_timestamp`, `model_name`.
 
-Trazabilidad: `fact_predictions → raw_happiness_events` devuelve el mensaje original (incluida partición y offset) que produjo cada predicción (consulta incluida en `sql/kpis.sql`).
+Traceability: `fact_predictions → raw_happiness_events` returns the original message (including partition and offset) that produced each prediction (query included in `sql/kpis.sql`).
 
 ### 5.2 Dashboard (`dashboards/app.py`, Streamlit)
-Consulta únicamente la base de datos (`HAPPINESS_DB` permite apuntar a otra). Filtro por año de observación.
-| KPI | Qué muestra | Cómo se lee |
+Queries the database only (`HAPPINESS_DB` lets you point to another one). Filter by observation year.
+| KPI | What it shows | How to read it |
 |---|---|---|
-| 1. Error de predicción promedio | MAE, RMSE y sesgo (pred − real) | MAE = error típico en puntos de score; el sesgo cercano a 0 indica que no sobre/subestima en promedio. |
-| 2. Predicciones por país | Barras (top 20) | Cobertura del streaming; la mayoría de países tiene 5 (uno por año). |
-| 3. Predicho vs real | Dispersión con diagonal y color por año | Puntos sobre la diagonal = predicción exacta. |
-| 4. Tendencia en el tiempo | MAE por minuto de emisión + score real vs predicho por año | Estabilidad del modelo durante el flujo y entre ediciones. |
-Además: tabla de calidad del pipeline (eventos por estado). Capturas reales en `docs/evidence/` (ver §7).
+| 1. Average prediction error | MAE, RMSE and bias (pred − actual) | MAE = typical error in score points; a bias near 0 means the model does not over/underestimate on average. |
+| 2. Predictions by country | Bar chart (top 20) | Streaming coverage; most countries have 5 (one per year). |
+| 3. Predicted vs actual | Scatter with diagonal and color by year | Points on the diagonal = exact prediction. |
+| 4. Trend over time | MAE per emission minute + actual vs predicted score by year | Model stability during the stream and across report editions. |
+
+Also: a pipeline quality table (events by status) and the rejection reasons. Real screenshots are in `docs/evidence/` (see §7).
 
 ---
 
-## 6. Reproducción paso a paso
-Requisitos: Python 3.12, Docker Desktop (puerto 9092 libre). Comandos para PowerShell en la raíz del proyecto.
+## 6. Step-by-step reproduction
+Requirements: Python 3.12, Docker Desktop (port 9092 free). PowerShell commands from the project root.
 
 ```powershell
-# 0. Entorno
+# 0. Environment
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
 
-# 1. (Opcional: ya vienen generados) Parte A: ejecutar en orden
+# 1. (Optional: already included) Part A: run in order
 #    notebooks/eda.ipynb  →  notebooks/model_training.ipynb
-#    Producen: data/processed/happiness_unified.csv, models/model.pkl, models/metrics.json, data/streaming/happiness_stream.csv
+#    They produce: data/processed/happiness_unified.csv, models/model.pkl, models/metrics.json, data/streaming/happiness_stream.csv
 
 # 2. Kafka
 docker compose up -d
 docker compose ps
 
-# 3. Terminal 1 — consumidor (crea storage/happiness.db sola)
+# 3. Terminal 1 — consumer (creates storage/happiness.db by itself)
 python kafka/consumer.py
 
-# 4. Terminal 2 — productor (crea el topic si no existe)
+# 4. Terminal 2 — producer (creates the topic if it does not exist)
 python kafka/producer.py --delay 0.2
-#   variante de demo con rechazos:  python kafka/producer.py --subset test --inject-invalid --delay 0.1
+#   demo variant with rejections:  python kafka/producer.py --subset test --inject-invalid --delay 0.1
 
 # 5. Terminal 3 — dashboard
 streamlit run dashboards/app.py
 ```
-**Inspección:**
+**Inspection:**
 ```powershell
 docker compose exec kafka /opt/kafka/bin/kafka-topics.sh --describe --topic happiness-events --bootstrap-server localhost:9092
 docker compose exec kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 --describe --group happiness-ml-team
 ```
-SQL: abrir `storage/happiness.db` con una extensión de SQLite de VS Code y ejecutar `sql/kpis.sql`.
+SQL: open `storage/happiness.db` with a VS Code SQLite extension and run `sql/kpis.sql`.
 
-**Prueba de reinicio (stop–produce–restart):** detener el consumidor con Ctrl+C, correr el productor, revisar el LAG con el comando anterior y volver a arrancar el consumidor: procesa el backlog y, gracias al `UNIQUE` por offset, no duplica filas.
+**Restart test (stop–produce–restart):** stop the consumer with Ctrl+C, run the producer, check the LAG with the command above, then start the consumer again: it processes the backlog and, thanks to the per-offset `UNIQUE`, does not duplicate rows.
 
-**Notas de la corrida real**
-- `model.pkl` se entrenó con scikit-learn 1.8.0; `requirements.txt` fija esa versión para evitar el `InconsistentVersionWarning` (si se usa otra versión, reentrenar con `notebooks/model_training.ipynb`).
-- `event_id` se genera con un contador (`E0001`…) **por ejecución del productor**. Volver a ejecutar el productor sobre el mismo topic reenvía los mismos `event_id`; el consumidor los rechaza como `INVALID_VALUES` (`duplicate event_id`) y no duplica filas en `fact_predictions`. Es la regla de unicidad del contrato funcionando; para una corrida limpia hay que reiniciar el entorno.
-- Un aviso inicial `UNKNOWN_TOPIC_OR_PART` del consumidor es normal si arranca antes de que el productor cree el topic; se recupera solo.
-- `python tests/check_db.py` imprime estados, motivos de rechazo y verifica que no haya duplicados en el hecho.
+**Notes from the real run**
+- `model.pkl` was trained with scikit-learn 1.8.0; `requirements.txt` pins that version to avoid `InconsistentVersionWarning` (if another version is used, retrain with `notebooks/model_training.ipynb`).
+- `event_id` is generated with a counter (`E0001`…) **per producer run**. Running the producer again on the same topic resends the same `event_id` values; the consumer rejects them as `INVALID_VALUES` (`duplicate event_id`) and does not duplicate rows in `fact_predictions`. This is the contract's uniqueness rule working; for a clean run the environment must be reset.
+- An initial `UNKNOWN_TOPIC_OR_PART` warning from the consumer is normal if it starts before the producer creates the topic; it recovers on its own.
+- `python tests/check_db.py` prints statuses and rejection reasons and verifies there are no duplicates in the fact table.
 
-**Reinicio limpio:** `docker compose down` (se pierde el topic: no hay volumen) y borrar `storage/happiness.db`.
+**Clean reset:** `docker compose down` (the topic is lost: no volume) and delete `storage/happiness.db`.
 
-**Sin Docker:** `python tests/test_pipeline.py --keep-db storage/happiness_demo.db` ejecuta todo el procesamiento del consumidor con mensajes simulados; luego `HAPPINESS_DB=storage/happiness_demo.db streamlit run dashboards/app.py`.
+**Without Docker:** `python tests/test_pipeline.py --keep-db storage/happiness_demo.db` runs the full consumer processing with simulated messages; then `HAPPINESS_DB=storage/happiness_demo.db streamlit run dashboards/app.py`.
 
 ---
 
-## 7. Verificación, pruebas y evidencia
+## 7. Verification, tests and evidence
 
-### 7.1 Corrida real con Kafka (Docker, `apache/kafka:4.4.0`)
-Se ejecutó el flujo completo: consumidor + productor (`--inject-invalid`) + dashboard. Resultado verificado con `tests/check_db.py` (`docs/evidence/check_db_output.txt`):
+### 7.1 Real run with Kafka (Docker, `apache/kafka:4.4.0`)
+The complete flow was executed: consumer + producer (`--inject-invalid`) + dashboard. Result verified with `tests/check_db.py` (`docs/evidence/check_db_output.txt`):
 
-| Estado | Eventos | Origen |
+| Status | Events | Origin |
 |---|---|---|
-| `VALID` | **782** | Todo el dataset |
-| `INVALID_SCHEMA` | 4 | Campo faltante, tipo erróneo, país vacío, JSON roto (defectos de demo) |
-| `INVALID_VALUES` | 2 (+20 tras la prueba de reinicio) | Valor fuera de rango y fecha inválida (demo) |
+| `VALID` | **782** | The whole dataset |
+| `INVALID_SCHEMA` | 4 | Missing field, wrong type, empty country, broken JSON (demo defects) |
+| `INVALID_VALUES` | 2 (+20 after the restart test) | Out-of-range value and invalid date (demo) |
 
-`fact_predictions` tiene **782 filas con 782 `event_id` distintos**; MAE 0.429, RMSE 0.549, sesgo −0.003. Los mensajes se repartieron entre las 3 particiones (p0 326, p1 234, p2 248 contando todos los estados). Cada rechazo quedó en la tabla raw con su motivo y el consumidor nunca se detuvo.
+`fact_predictions` has **782 rows with 782 distinct `event_id` values**; MAE 0.429, RMSE 0.549, bias −0.003. Messages were spread across the 3 partitions (p0 326, p1 234, p2 248 counting all statuses). Every rejection was stored in the raw table with its reason and the consumer never stopped.
 
-**Dashboard (consulta la BD)**
+**Dashboard (queries the DB)**
 
 ![KPIs 1–3](docs/evidence/dashboard_kpis_1_3.png)
-*KPI 1: MAE 0.429 / RMSE 0.549 / sesgo −0.003 (el modelo no sobre ni subestima en promedio). KPI 2: cada país tiene 5 predicciones (una por año). KPI 3: los puntos siguen la diagonal; el error es mayor en los extremos del score.*
+*KPI 1: MAE 0.429 / RMSE 0.549 / bias −0.003 (the model does not over- or underestimate on average). KPI 2: every country has 5 predictions (one per year). KPI 3: points follow the diagonal; the error is larger at the extremes of the score.*
 
 ![KPI 4](docs/evidence/dashboard_kpi4.png)
-*KPI 4 (derecha): el score predicho queda bajo el real en 2016 (≈5.12 vs 5.38) y sobre el real desde 2017 (≈5.49 vs 5.35–5.41). Es el cambio de escala de `family` y `health` entre ediciones del reporte (§9). Izquierda: MAE por minuto de emisión del evento.*
+*KPI 4 (right): the predicted score falls below the actual one in 2016 (≈5.12 vs 5.38) and above it from 2017 (≈5.49 vs 5.35–5.41). This is the scale change in `family` and `health` between report editions (§8). Left: MAE per event-emission minute.*
 
-![Calidad](docs/evidence/dashboard_quality.png)
-*Eventos por estado en la tabla raw: 782 VALID, 4 INVALID_SCHEMA y 22 INVALID_VALUES (2 de demo + 20 duplicados de la prueba de reinicio).*
+![Quality](docs/evidence/dashboard_quality.png)
+*Events by status in the raw table: 782 VALID, 4 INVALID_SCHEMA and 22 INVALID_VALUES (2 from the demo + 20 duplicates from the restart test).*
 
-### 7.2 Prueba stop–produce–restart (`docs/evidence/consumer_group_lag.txt`)
-1. Consumidor detenido con Ctrl+C; grupo al día: **LAG 0** en las 3 particiones (offsets 451 / 341 / 356).
-2. Con el consumidor apagado, el productor envió 20 eventos. Kafka los retuvo: LOG-END-OFFSET pasó a 463 / 344 / 361 y el **LAG total fue 12 + 3 + 5 = 20**.
-3. Al reiniciar el consumidor (mismo grupo) retomó desde su último offset confirmado, procesó el backlog y el **LAG volvió a 0**; ahora aparecen `CONSUMER-ID` y `HOST` activos.
-4. Los 20 eventos eran `E0001`–`E0020`, ya cargados, por lo que quedaron como `INVALID_VALUES: duplicate event_id` (20). `fact_predictions` siguió en 782 filas: **un replay no corrompe la tabla de hechos**.
+### 7.2 Stop–produce–restart test (`docs/evidence/consumer_group_lag.txt`)
+1. Consumer stopped with Ctrl+C; group up to date: **LAG 0** on the 3 partitions (offsets 451 / 341 / 356).
+2. With the consumer off, the producer sent 20 events. Kafka retained them: LOG-END-OFFSET moved to 463 / 344 / 361 and the **total LAG was 12 + 3 + 5 = 20**.
+3. When the consumer restarted (same group) it resumed from its last committed offset, processed the backlog and the **LAG returned to 0**; `CONSUMER-ID` and `HOST` now appear as active.
+4. The 20 events were `E0001`–`E0020`, already loaded, so they ended as `INVALID_VALUES: duplicate event_id` (20). `fact_predictions` stayed at 782 rows: **a replay does not corrupt the fact table**.
 
-*Nota:* los offsets suman más de 788 porque el topic conserva además los 360 mensajes de las pruebas previas (ya consumidos antes de reiniciar la BD).
+*Note:* the offsets add up to more than 788 because the topic also retains the 360 messages from earlier test runs (already consumed before the DB was reset).
 
-### 7.3 Pruebas automáticas sin broker (`tests/test_pipeline.py`)
-Reproduce el consumidor con mensajes simulados (partición/offset) y comprueba con *asserts*: 783 VALID (782 + un evento con campo extra que se ignora) con el mismo número de filas en el hecho; 7 `INVALID_SCHEMA`; 4 `INVALID_VALUES` (rango, fecha, `event_id` duplicado, NaN); 1 `PREDICTION_ERROR` (modelo que lanza excepción); un replay del mismo (partición, offset) se omite; todo mensaje queda en raw con su estado. El dashboard se probó con `streamlit.testing` (sin excepciones).
+### 7.3 Automated tests without a broker (`tests/test_pipeline.py`)
+Reproduces the consumer with simulated messages (partition/offset) and checks with *asserts*: 783 VALID (782 + one event with an extra field that is ignored) with the same number of rows in the fact table; 7 `INVALID_SCHEMA`; 4 `INVALID_VALUES` (range, date, duplicate `event_id`, NaN); 1 `PREDICTION_ERROR` (a model that raises an exception); a replay of the same (partition, offset) is skipped; every message lands in raw with its status. The dashboard was tested with `streamlit.testing` (no exceptions).
 
-## 8. Cumplimiento del enunciado
-| Requisito | Estado | Dónde |
-|---|---|---|
-| EDA: nulos, duplicados, nombres, tipos, esquemas, outliers | ✅ | `notebooks/eda.ipynb` |
-| Esquema unificado + justificación de limpieza | ✅ | §3.2, notebook |
-| Feature engineering: selección, justificación, sin fuga, categóricas, escalado | ✅ | §3.3 |
-| Pipeline de scikit-learn serializado como `model.pkl`; split 70/30; MAE/RMSE/R² | ✅ | §3.4 |
-| Productor: fila a fila, JSON, key=country, delay configurable, 3 part./RF=1, topic `happiness-events`, formato exacto | ✅ | `kafka/producer.py` |
-| Contrato del evento definido antes del consumidor | ✅ | §4.2 |
-| Consumidor: grupo `happiness-ml-team`, raw antes de validar, validar, mismo orden de features, cargar modelo, predecir, guardar | ✅ | `kafka/consumer.py`, `processing.py` |
-| Estados VALID / INVALID_SCHEMA / INVALID_VALUES / PREDICTION_ERROR; inválidos guardados, omitidos y sin caídas | ✅ | §4.2, §7 |
-| Tablas `raw_happiness_events`, `fact_predictions`, `dim_country`, `dim_date`; enlace por `raw_event_id`; `event_time` y `prediction_timestamp` | ✅ | `sql/create_tables.sql` |
-| Dashboard sobre la BD (no CSV) con los 4 KPIs | ✅ | `dashboards/app.py` |
-| Estructura de carpetas, `requirements.txt`, `docker-compose.yml`, README con todas las secciones | ✅ | este informe |
-| Ejecución real contra un broker Kafka y capturas de esa ejecución | ✅ | §7.1 y §7.2, `docs/evidence/` |
-| Repositorio GitHub y presentación (30 %) | ⚠️ **Pendiente del estudiante** | — |
+---
 
-## 9. Limitaciones y trabajo futuro
-1. **Entorno de prueba:** se validó en un solo broker local (RF=1). No cubre fallos de broker ni particiones replicadas.
-2. **Cambio de escala entre ediciones del reporte:** las medias de `family` pasan de ≈0.99 (2015) y 0.79 (2016) a ≈1.19–1.21 (2017–2019), y `health` también varía. Por eso el error con signo por año es −0.26 en 2016 y +0.09 a +0.14 desde 2017: un modelo único mezcla escalas ligeramente distintas. Mejora posible: normalizar por año o incluir `year` como feature.
-3. **Ventana de datos:** el streaming reutiliza las mismas observaciones con las que se entrenó (el 70 % de los países); `--subset test` emite solo países no vistos para evaluar sin sesgo.
-4. **Persistencia de Kafka:** el compose del curso no define volumen; al hacer `down` se pierde el topic.
-5. **Dashboard:** Streamlit en lugar de Power BI/Looker/Tableau (el enunciado solo los sugiere); el esquema es portable a PostgreSQL si se requiere una de esas herramientas.
-6. **Mejoras:** DLQ como topic separado, métricas de deriva del modelo, PostgreSQL, ventanas temporales.
+## 8. Limitations and future work
+1. **Test environment:** validated on a single local broker (RF=1). It does not cover broker failures or replicated partitions.
+2. **Scale change between report editions:** the mean of `family` goes from ≈0.99 (2015) and 0.79 (2016) to ≈1.19–1.21 (2017–2019), and `health` also varies. Hence the signed error by year is −0.26 in 2016 and +0.09 to +0.14 from 2017: a single model mixes slightly different scales. Possible improvement: normalize by year or include `year` as a feature.
+3. **Data window:** the stream reuses the same observations the model was trained on (70% of the countries); `--subset test` emits only unseen countries for an unbiased evaluation.
+4. **Kafka persistence:** the course compose file defines no volume; on `down` the topic is lost.
+5. **Dashboard:** Streamlit instead of Power BI/Looker/Tableau (the assignment only suggests them); the schema is portable to PostgreSQL if one of those tools is required.
+6. **Improvements:** DLQ as a separate topic, model drift metrics, PostgreSQL, time windows.
 
-## 10. Estructura del repositorio
+## 9. Repository structure
 ```
-├── data/{raw,processed,streaming}/      CSV originales, dataset unificado y dataset para streaming
+├── data/{raw,processed,streaming}/      Original CSVs, unified dataset and streaming dataset
 ├── notebooks/{eda,model_training}.ipynb
 ├── kafka/{producer,consumer,processing}.py
 ├── models/{model.pkl,metrics.json}
 ├── sql/{create_tables.sql,kpis.sql}
 ├── dashboards/app.py
-├── docs/evidence/                       Capturas y salidas de la corrida real
-├── storage/                             BD SQLite (se genera al ejecutar)
+├── docs/evidence/                       Screenshots and outputs from the real run
+├── storage/                             SQLite DB (generated at runtime)
 ├── tests/{test_pipeline.py,check_db.py}
 ├── docker-compose.yml · requirements.txt · README.md
 ```
